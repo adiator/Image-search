@@ -27,15 +27,15 @@ img_embeddings = []
 p = 0
 for img_path in image_paths:
     
-    image = preprocess(Image.open(img_path)).to(device)
+    image = preprocess(Image.open(img_path)).to(device) #([3, 224, 224])
     p+=1
     imgs.append(image)
 
     print(f"Images processed : {p}/{len(image_paths)}", end='\r')
     if(len(imgs) == batch_size):
         with torch.no_grad():
-            image_batch = torch.stack(imgs).to(device)
-            img_e = model.encode_image(image_batch)
+            image_batch = torch.stack(imgs).to(device) #([32, 3, 224, 224]
+            img_e = model.encode_image(image_batch) #([32, 512]
             img_e /= img_e.norm(dim=-1, keepdim=True)
             img_embeddings.append(img_e)
         imgs = []
@@ -48,7 +48,7 @@ if len(imgs) > 0:
             img_e /= img_e.norm(dim=-1, keepdim=True)
             img_embeddings.append(img_e)
 
-img_embeddings = torch.cat(img_embeddings, dim=0)
+img_embeddings = torch.cat(img_embeddings, dim=0) #([3000, 512]
 
 
 def search_image_paths(query: str, result_count: int) -> list[str | None]:
@@ -64,23 +64,6 @@ def search_image_paths(query: str, result_count: int) -> list[str | None]:
     top_results, indices = torch.topk(prob, result_count, dim=0)
 
     out = [image_paths[i.item()] for i in indices]
-    """Return the top image paths for a query.
-
-    Replace the body of this function with your actual image search logic.
-    The UI expects up to `result_count` entries, where each entry is either:
-    - a string path to an image file, or
-    - None when there is no image for that result slot.
-
-    Suggested place for your future logic:
-    1. Encode `query` with your text model.
-    2. Compare the text embedding against your precomputed image embeddings.
-    3. Pick the top `result_count` image paths.
-    4. Return those paths as strings.
-
-    Keep the return shape stable so the UI code below does not need to change.
-    """
-    # Intentionally no search implementation here.
-    # Returning empty slots keeps this file as a frontend skeleton only.
     return out
 
 
@@ -89,7 +72,6 @@ def run_search(query: str, result_count: int) -> tuple:
     cleaned_query = query.strip()
 
     if not cleaned_query:
-        # Empty query: clear all result slots.
         return tuple(
             gr.update(value=None, visible=False)
             for _ in range(MAX_RESULTS)
@@ -97,7 +79,6 @@ def run_search(query: str, result_count: int) -> tuple:
 
     result_paths = search_image_paths(cleaned_query, result_count)
 
-    # Gradio's image outputs work best with plain string file paths.
     results = [
         str(path) if path is not None else None
         for path in result_paths
@@ -155,7 +136,6 @@ with gr.Blocks(
             for index in range(MAX_RESULTS)
         ]
 
-    # Both clicking Search and pressing Enter in the textbox call the same stub.
     search_button.click(
         fn=run_search,
         inputs=[query_input, result_count_slider],
