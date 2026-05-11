@@ -1,98 +1,129 @@
-import torch, open_clip
-from PIL import Image
+import sys
 from pathlib import Path
-import gradio as gr
+
+qwen_repo = Path("/home/aditya/work/ml-stuff/tool/Qwen3-VL-Embedding")
+sys.path.append(str(qwen_repo))
+
+from src.models.qwen3_vl_embedding import Qwen3VLEmbedder
+import torch
+import torch.nn.functional as F
+from transformers import BitsAndBytesConfig
+from PIL import Image
 import os
+import gradio as gr
 
-model_name = "laion/CLIP-ViT-B-16-laion2B-s34B-b88K"
 
-model, preprocess = open_clip.create_model_from_pretrained(
-    f"hf-hub:{model_name}"
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
 )
-tokenizer = open_clip.get_tokenizer(model_name)
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
-model.to(device)
+model = Qwen3VLEmbedder(
+    model_name_or_path="Qwen/Qwen3-VL-Embedding-2B",
+    quantization_config=bnb_config,
+    device_map="auto",
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = BASE_DIR / "images"
+image_paths = list(IMAGE_DIR.glob("*.jpg"))
+
+image_inputs = [{"image": str(path)} for path in image_paths]
+
 NUM_RESULTS = 5
 MAX_RESULTS = 25
 
-batch_size = 32
-image_paths = list(IMAGE_DIR.glob("*.jpg"))
+img_embeddings = []
+imgs = []
+p = 0
 
-if os.path.exists(BASE_DIR / "embeddings.pt"):
-    img_embeddings = torch.load(BASE_DIR / "embeddings.pt") 
+batch_size = 2
+
+
+if os.path.exists(BASE_DIR / "qwen_image_embeddings.pt"):
+    img_embeddings = torch.load(BASE_DIR / "qwen_image_embeddings.pt") 
 else:
-    imgs = []
-    img_embeddings = []
-
-    p = 0
     for img_path in image_paths:
-        image = preprocess(Image.open(img_path)).to(device) #([3, 224, 224])
-        p+=1
-        imgs.append(image)
+        imgs.append(img_path)
+        p += 1
 
-        print(f"Images processed : {p}/{len(image_paths)}", end='\r')
-        if(len(imgs) == batch_size):
+        print(f"Images queued : {p}/{len(image_paths)}", end="\r")
+
+        if len(imgs) == batch_size:
+            batch = [
+                {"image": str(path)}
+                for path in imgs
+            ]
+
             with torch.no_grad():
-                image_batch = torch.stack(imgs).to(device) #([32, 3, 224, 224]
-                img_e = model.encode_image(image_batch) #([32, 512]
-                img_e /= img_e.norm(dim=-1, keepdim=True)
-                img_embeddings.append(img_e)
+                img_e = model.process(batch)
+                img_e = F.normalize(img_e, p=2, dim=-1)
+
+            img_embeddings.append(img_e.cpu())
             imgs = []
 
-        
-    if len(imgs) > 0:
-        with torch.no_grad():
-                image_batch = torch.stack(imgs).to(device)
-                img_e = model.encode_image(image_batch)
-                img_e /= img_e.norm(dim=-1, keepdim=True)
-                img_embeddings.append(img_e)
+            torch.cuda.empty_cache()
 
-    img_embeddings = torch.cat(img_embeddings, dim=0) #([3000, 512]
-    torch.save(img_embeddings, BASE_DIR / "embeddings.pt")
+    # leftover images
+    if len(imgs) > 0:
+        batch = [
+            {"image": str(path)}
+            for path in imgs
+        ]
+
+        with torch.no_grad():
+            img_e = model.process(batch)
+            img_e = F.normalize(img_e, p=2, dim=-1)
+
+        img_embeddings.append(img_e.cpu())
+        torch.cuda.empty_cache()
+
+    img_embeddings = torch.cat(img_embeddings, dim=0)
+
+    torch.save(img_embeddings, BASE_DIR / "qwen_image_embeddings.pt")
 
 
 def search_image_paths(query: str, result_count: int) -> list[Path]:
 
     with torch.no_grad():
-        text = tokenizer(query).to(device)
-        text_e = model.encode_text(text)
-        text_e /= text_e.norm(dim=-1, keepdim=True)
-        similarity = img_embeddings @ text_e.T
-        similarity = similarity.squeeze(1)
+        query_embedding = model.process([
+            {
+                "text": query,
+                "instruction": "Retrieve images that visually match the user's description."
+            }
+        ])
+        query_embedding = F.normalize(query_embedding, p=2, dim=-1).cpu()
+
+        scores = query_embedding @ img_embeddings.T
 
     result_count = max(1, min(int(result_count), len(image_paths)))
-    top_results, indices = torch.topk(similarity, result_count, dim=0)
+    top_results, indices = torch.topk(scores, result_count, dim=1)
+    indices = indices.squeeze(0)
 
     out = [image_paths[i.item()] for i in indices]
     return out
 
 
 def search_image_paths_from_image(query_image_path: str, result_count: int) -> list[Path]:
-    """Return matching image paths for an uploaded query image.
-
-    Fill this in with your image-to-image retrieval logic.
-
-    Suggested shape:
-    1. Load the uploaded image from `query_image_path`.
-    2. Preprocess it with the same CLIP preprocessing pipeline.
-    3. Encode it with `model.encode_image(...)`.
-    4. Compare that embedding against `img_embeddings`.
-    5. Return the top `result_count` paths from `image_paths`.
-    """
-    image = preprocess(Image.open(query_image_path)).unsqueeze(0).to(device)
+    
     with torch.no_grad():
-        img_e = model.encode_image(image)
-        img_e /= img_e.norm(dim=-1, keepdim=True)
-        similarity = img_embeddings @ img_e.T
-        similarity = similarity.squeeze(1)
+        query_image_embedding = model.process([
+            {
+                "image": query_image_path,
+                "instruction": "Retrieve images that visually match the given image."
+            }
+        ])
+        query_image_embedding = F.normalize(query_image_embedding, p=2, dim=-1).cpu()
+
+        scores = query_image_embedding @ img_embeddings.T
 
     result_count = max(1, min(int(result_count), len(image_paths)))
-    top_results, indices = torch.topk(similarity, result_count, dim=0)
+    top_results, indices = torch.topk(similarity, result_count, dim=1)
+    indices = indices.squeeze(0)
 
     out = [image_paths[i.item()] for i in indices]
     return out
