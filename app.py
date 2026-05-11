@@ -1,7 +1,34 @@
 import sys
 from pathlib import Path
+import os
 
-qwen_repo = Path("/home/aditya/work/ml-stuff/tool/Qwen3-VL-Embedding")
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def resolve_qwen_repo() -> Path:
+    env_path = os.environ.get("QWEN3_VL_EMBEDDING_REPO")
+    if env_path:
+        candidate = Path(env_path).expanduser().resolve()
+        if (candidate / "src" / "models" / "qwen3_vl_embedding.py").exists():
+            return candidate
+
+    search_roots = [
+        BASE_DIR.parent / "Qwen3-VL-Embedding",
+    ]
+    for candidate in search_roots:
+        candidate = candidate.resolve()
+        if (candidate / "src" / "models" / "qwen3_vl_embedding.py").exists():
+            return candidate
+
+    raise FileNotFoundError(
+        "Could not find the Qwen3-VL-Embedding repository. "
+        "Set QWEN3_VL_EMBEDDING_REPO to your local clone path, or place the repo at "
+        "'../Qwen3-VL-Embedding' relative to imagesearch/app.py."
+    )
+
+
+qwen_repo = resolve_qwen_repo()
 sys.path.append(str(qwen_repo))
 
 from src.models.qwen3_vl_embedding import Qwen3VLEmbedder
@@ -9,7 +36,6 @@ import torch
 import torch.nn.functional as F
 from transformers import BitsAndBytesConfig
 from PIL import Image
-import os
 import gradio as gr
 
 
@@ -28,7 +54,6 @@ model = Qwen3VLEmbedder(
 )
 
 
-BASE_DIR = Path(__file__).resolve().parent
 IMAGE_DIR = BASE_DIR / "images"
 image_paths = list(IMAGE_DIR.glob("*.jpg"))
 
