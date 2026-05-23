@@ -37,7 +37,8 @@ import torch.nn.functional as F
 from transformers import BitsAndBytesConfig
 from PIL import Image
 import gradio as gr
-
+from src.models.qwen3_vl_reranker import Qwen3VLReranker
+from huggingface_hub import snapshot_download
 
 
 bnb_config = BitsAndBytesConfig(
@@ -53,6 +54,16 @@ model = Qwen3VLEmbedder(
     device_map="auto",
 )
 
+reranker_path = snapshot_download(
+    "Qwen/Qwen3-VL-Reranker-2B",
+    local_files_only=True,   # use False the first time if it is not cached yet
+)
+
+reranker = Qwen3VLReranker(
+    model_name_or_path=reranker_path,
+    quantization_config=bnb_config,
+    device_map="auto",
+)
 
 IMAGE_DIR = BASE_DIR / "images"
 image_paths = list(IMAGE_DIR.glob("*.jpg"))
@@ -112,6 +123,8 @@ else:
     torch.save(img_embeddings, BASE_DIR / "qwen_image_embeddings.pt")
 
 
+
+
 def search_image_paths(query: str, result_count: int) -> list[Path]:
 
     with torch.no_grad():
@@ -126,10 +139,29 @@ def search_image_paths(query: str, result_count: int) -> list[Path]:
         scores = query_embedding @ img_embeddings.T
 
     result_count = max(1, min(int(result_count), len(image_paths)))
-    top_results, indices = torch.topk(scores, result_count, dim=1)
+    top_results, indices = torch.topk(scores, 25, dim=1)
     indices = indices.squeeze(0)
 
-    out = [image_paths[i.item()] for i in indices]
+    candidate_paths = [str(image_paths[i]) for i in indices]
+
+    rerank_inputs = {
+    # "instruction": "Rank images by how well they visually match the user's query.",
+    "query": {
+        "text": query
+    },
+    "documents": [
+        {"image": str(path)}
+        for path in candidate_paths
+    ]
+}
+
+    rerank_scores = reranker.process(rerank_inputs)
+    rerank_scores = torch.tensor(rerank_scores)
+
+    top_results, indices = torch.topk(rerank_scores, result_count, dim=0)
+    indices = indices.squeeze(0)
+
+    out = [candidate_paths[i.item()] for i in indices]
     return out
 
 
@@ -147,10 +179,30 @@ def search_image_paths_from_image(query_image_path: str, result_count: int) -> l
         scores = query_image_embedding @ img_embeddings.T
 
     result_count = max(1, min(int(result_count), len(image_paths)))
-    top_results, indices = torch.topk(similarity, result_count, dim=1)
+    top_results, indices = torch.topk(scores, result_count, dim=1)
     indices = indices.squeeze(0)
 
-    out = [image_paths[i.item()] for i in indices]
+    candidate_paths = [str(image_paths[i]) for i in indices]
+
+    rerank_inputs = {
+    # "instruction": "Rank images by how well they visually match the user's query.",
+    "query": {
+        "image": query_image_pathcd
+    },
+    "documents": [
+        {"image": str(path)}
+        for path in candidate_paths
+    ]
+}
+
+    rerank_scores = reranker.process(rerank_inputs)
+    rerank_scores = torch.tensor(rerank_scores)
+
+    top_results, indices = torch.topk(rerank_scores, result_count, dim=0)
+    indices = indices.squeeze(0)
+
+    out = [candidate_paths[i.item()] for i in indices]
+
     return out
 
 
